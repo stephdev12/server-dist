@@ -1,0 +1,22 @@
+{
+  "name": "whatoo",
+  "version": "1.0.0",
+  "description": "WhatsApp automation SaaS with pairing code and buttons",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "frontend-install": "npm init -y --prefix frontend && cd frontend && npm install && cd ..",
+    "build": "cd frontend && npm install && npm run build"
+  },
+  "dependencies": {
+    "convex": "^1.39.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.2",
+    "gifted-baileys": "^1.1.8",
+    "pm2": "^7.0.1",
+    "ws": "^8.18.0"
+  }
+}

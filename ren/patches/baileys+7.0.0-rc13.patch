@@ -1,0 +1,191 @@
+diff --git a/node_modules/baileys/lib/Socket/messages-send.js b/node_modules/baileys/lib/Socket/messages-send.js
+index d61e064..3f1ab48 100644
+--- a/node_modules/baileys/lib/Socket/messages-send.js
++++ b/node_modules/baileys/lib/Socket/messages-send.js
+@@ -831,6 +831,34 @@ export const makeMessagesSocket = (config) => {
+                 ;
+                 stanza.content.push(...additionalNodes);
+             }
++            const checkInteractive = (msg) => {
++                if (!msg) return false;
++                if (msg.interactiveMessage || msg.buttonsMessage || msg.templateMessage || msg.listMessage) return true;
++                if (msg.viewOnceMessage?.message) return checkInteractive(msg.viewOnceMessage.message);
++                if (msg.viewOnceMessageV2?.message) return checkInteractive(msg.viewOnceMessageV2.message);
++                return false;
++            };
++            if (checkInteractive(message)) {
++                const hasBizNode = stanza.content.some(n => n && n.tag === 'biz');
++                if (!hasBizNode) {
++                    stanza.content.push({
++                        tag: 'biz',
++                        attrs: {},
++                        content: [{
++                            tag: 'interactive',
++                            attrs: { type: 'native_flow', v: '1' },
++                            content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }]
++                        }]
++                    });
++                }
++                const isPrivate = !isGroup && !isStatus && !isNewsletter;
++                if (isPrivate) {
++                    const hasBotNode = stanza.content.some(n => n && n.tag === 'bot');
++                    if (!hasBotNode) {
++                        stanza.content.push({ tag: 'bot', attrs: { biz_bot: '1' } });
++                    }
++                }
++            }
+             logger.debug({ msgId }, `sending message to ${participants.length} devices`);
+             await sendNode(stanza);
+             // Fire-and-forget: issue our token to the contact AFTER message send.
+diff --git a/node_modules/baileys/lib/Utils/messages.js b/node_modules/baileys/lib/Utils/messages.js
+index 247b1f1..3aaf2dd 100644
+--- a/node_modules/baileys/lib/Utils/messages.js
++++ b/node_modules/baileys/lib/Utils/messages.js
+@@ -270,6 +270,83 @@ export const hasNonNullishProperty = (message, key) => {
+ function hasOptionalProperty(obj, key) {
+     return typeof obj === 'object' && obj !== null && key in obj && obj[key] !== null;
+ }
++const prepareNativeFlowButtons = (message) => {
++    const buttons = message.buttons || message.nativeFlow;
++    const isButtonsFieldArray = Array.isArray(buttons);
++    const correctedField = isButtonsFieldArray ? buttons : buttons.buttons;
++    const messageParamsJson = {};
++    if (hasOptionalProperty(message, 'optionText') && !!message.optionText) {
++        Object.assign(messageParamsJson, {
++            bottom_sheet: {
++                in_thread_buttons_limit: 1,
++                divider_indices: Array.from({ length: correctedField.length }, (_, index) => index),
++                list_title: message.optionTitle || '📄 Select Options',
++                button_title: message.optionText
++            }
++        });
++    }
++    return {
++        buttons: correctedField.map(button => {
++            const buttonText = button.text || button.buttonText;
++            const buttonIcon = button.icon?.toUpperCase();
++            if (hasOptionalProperty(button, 'id') && !!button.id) {
++                return {
++                    name: 'quick_reply',
++                    buttonParamsJson: JSON.stringify({
++                        display_text: buttonText || '👉🏻 Click',
++                        id: button.id,
++                        icon: buttonIcon
++                    })
++                };
++            }
++            else if (hasOptionalProperty(button, 'copy') && !!button.copy) {
++                return {
++                    name: 'cta_copy',
++                    buttonParamsJson: JSON.stringify({
++                        display_text: buttonText || '📋 Copy',
++                        copy_code: button.copy,
++                        icon: buttonIcon
++                    })
++                };
++            }
++            else if (hasOptionalProperty(button, 'url') && !!button.url) {
++                return {
++                    name: 'cta_url',
++                    buttonParamsJson: JSON.stringify({
++                        display_text: buttonText || '🌐 Visit',
++                        url: button.url,
++                        merchant_url: button.url,
++                        webview_interaction: button.useWebview,
++                        icon: buttonIcon
++                    })
++                };
++            }
++            else if (hasOptionalProperty(button, 'call') && !!button.call) {
++                return {
++                    name: 'cta_call',
++                    buttonParamsJson: JSON.stringify({
++                        display_text: buttonText || '📞 Call',
++                        phone_number: button.call,
++                        icon: buttonIcon
++                    })
++                };
++            }
++            else if (hasOptionalProperty(button, 'sections') && !!button.sections) {
++                return {
++                    name: 'single_select',
++                    buttonParamsJson: JSON.stringify({
++                        title: buttonText || '📋 Select',
++                        sections: button.sections,
++                        icon: buttonIcon
++                    })
++                };
++            }
++            return button;
++        }),
++        messageParamsJson: JSON.stringify(messageParamsJson),
++        messageVersion: 3
++    };
++};
+ export const generateWAMessageContent = async (message, options) => {
+     var _a, _b;
+     let m = {};
+@@ -488,6 +565,63 @@ export const generateWAMessageContent = async (message, options) => {
+     else {
+         m = await prepareWAMessageMedia(message, options);
+     }
++    if (hasNonNullishProperty(message, 'buttons')) {
++        const interactiveMessage = {
++            nativeFlowMessage: prepareNativeFlowButtons(message)
++        };
++        if (hasOptionalProperty(message, 'text')) {
++            interactiveMessage.body = { text: message.text };
++        }
++        else if (hasOptionalProperty(message, 'caption')) {
++            interactiveMessage.body = { text: message.caption };
++            interactiveMessage.header = {
++                title: message.title || '',
++                subtitle: message.subtitle || '',
++                hasMediaAttachment: (m.imageMessage || m.videoMessage || m.documentMessage) ? true : false
++            };
++            Object.assign(interactiveMessage.header, m);
++        }
++        if (hasOptionalProperty(message, 'footer')) {
++            interactiveMessage.footer = { text: message.footer };
++        }
++        m = { interactiveMessage };
++    }
++    else if (hasNonNullishProperty(message, 'carousel')) {
++        const interactiveMessage = {
++            carouselMessage: {
++                cards: message.carousel.map(card => {
++                    const cardContent = {
++                        body: { text: card.body || "" },
++                        nativeFlowMessage: prepareNativeFlowButtons({ buttons: card.buttons || [] })
++                    };
++                    if (card.header) {
++                        cardContent.header = {
++                            title: card.header.title || "",
++                            subtitle: card.header.subtitle || "",
++                            hasMediaAttachment: (card.header.imageMessage || card.header.videoMessage || card.header.documentMessage) ? true : false
++                        };
++                        Object.assign(cardContent.header, card.header);
++                    }
++                    return cardContent;
++                }),
++                messageVersion: 1
++            }
++        };
++        if (hasOptionalProperty(message, 'text')) {
++            interactiveMessage.body = { text: message.text };
++        }
++        if (hasOptionalProperty(message, 'footer')) {
++            interactiveMessage.footer = { text: message.footer };
++        }
++        m = { 
++            viewOnceMessage: { 
++                message: { 
++                    messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 }, 
++                    interactiveMessage 
++                } 
++            } 
++        };
++    }
+     if (hasOptionalProperty(message, 'viewOnce') && !!message.viewOnce) {
+         m = { viewOnceMessage: { message: m } };
+     }
