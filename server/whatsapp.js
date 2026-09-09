@@ -42,7 +42,24 @@ class WhatsAppInstanceManager {
 
   copyFolderRecursive(src, dest) {
     if (!fs.existsSync(dest)) {
-      fs.mkdirSync(dest, { recursive: true });
+      fs.mkdirSync(dest, { recursive: true, mode: 0o777 });
+    }
+
+    if (typeof fs.cpSync === 'function') {
+      try {
+        fs.cpSync(src, dest, {
+          recursive: true,
+          force: true,
+          dereference: true,
+          filter: (srcPath) => {
+            const base = path.basename(srcPath);
+            return base !== 'node_modules' && base !== 'session' && base !== '.git';
+          }
+        });
+        return;
+      } catch (err) {
+        console.warn(`[COPY] fs.cpSync avertissement: ${err.message}. Repli sur copie récursive manuelle...`);
+      }
     }
 
     const entries = fs.readdirSync(src, { withFileTypes: true });
@@ -58,7 +75,11 @@ class WhatsAppInstanceManager {
       if (entry.isDirectory()) {
         this.copyFolderRecursive(srcPath, destPath);
       } else {
-        fs.copyFileSync(srcPath, destPath);
+        try {
+          fs.copyFileSync(srcPath, destPath);
+        } catch (err) {
+          console.error(`[COPY] Erreur copie ${srcPath} vers ${destPath}:`, err.message);
+        }
       }
     }
   }
@@ -629,34 +650,72 @@ module.exports = {
       await runPm2(`delete whatoo_${whatooId}`).catch(() => {});
 
       const mainDir = path.join(__dirname, '..');
-    const renDir = path.join(mainDir, 'ren');
-    const instanceDir = path.join(mainDir, 'instances', `whatoo_${whatooId}`);
+      const renDir = path.join(mainDir, 'ren');
+      const instancesParent = path.join(mainDir, 'instances');
+      const instanceDir = path.join(instancesParent, `whatoo_${whatooId}`);
 
-    // 1. Clone ren directory
-    console.log(`Clonage du bot REN master vers ${instanceDir}...`);
-    this.copyFolderRecursive(renDir, instanceDir);
-
-    // 2. Symlink node_modules
-    const destNodeModules = path.join(instanceDir, 'node_modules');
-    const srcNodeModules = path.join(renDir, 'node_modules');
-
-    try {
-      if (fs.existsSync(destNodeModules) || fs.lstatSync(destNodeModules).isSymbolicLink()) {
-        console.log(`[SYMLINK] Suppression de l'ancien node_modules ou lien mort vers ${destNodeModules}...`);
-        fs.rmSync(destNodeModules, { recursive: true, force: true });
+      if (!fs.existsSync(instancesParent)) {
+        fs.mkdirSync(instancesParent, { recursive: true, mode: 0o777 });
       }
-    } catch (e) {
-      // Ignorer si n'existe pas
-    }
+      if (!fs.existsSync(instanceDir)) {
+        fs.mkdirSync(instanceDir, { recursive: true, mode: 0o777 });
+      }
 
-    if (!fs.existsSync(destNodeModules)) {
-      console.log(`[SYMLINK] Création du lien symbolique node_modules : ${srcNodeModules} -> ${destNodeModules}`);
+      console.log(`[BOT INIT] Vérification du template master REN dans ${renDir}...`);
+      if (!fs.existsSync(renDir)) {
+        throw new Error(`Dossier source REN introuvable : ${renDir}`);
+      }
+      const masterIndex = path.join(renDir, 'index.js');
+      if (!fs.existsSync(masterIndex)) {
+        throw new Error(`Fichier critique master introuvable : ${masterIndex}`);
+      }
+
+      // 1. Clone ren directory
+      console.log(`Clonage du bot REN master vers ${instanceDir}...`);
+      this.copyFolderRecursive(renDir, instanceDir);
+
+      // Garantir impérativement la présence des fichiers clés (index.js, package.json, config.js)
+      const essentialFiles = ['index.js', 'package.json', 'config.js'];
+      for (const f of essentialFiles) {
+        const srcF = path.join(renDir, f);
+        const destF = path.join(instanceDir, f);
+        if (fs.existsSync(srcF) && (!fs.existsSync(destF) || fs.statSync(destF).size === 0)) {
+          console.log(`[BOT INIT] Copie directe de secours pour ${f} vers ${destF}...`);
+          try {
+            fs.copyFileSync(srcF, destF);
+          } catch (copyErr) {
+            console.error(`[BOT INIT] Erreur copie secours ${f}:`, copyErr.message);
+          }
+        }
+      }
+
+      // 2. Symlink node_modules
+      const destNodeModules = path.join(instanceDir, 'node_modules');
+      let srcNodeModules = path.join(renDir, 'node_modules');
+      if (!fs.existsSync(srcNodeModules)) {
+        const rootNodeModules = path.join(mainDir, 'node_modules');
+        if (fs.existsSync(rootNodeModules)) {
+          srcNodeModules = rootNodeModules;
+        }
+      }
+
       try {
-        fs.symlinkSync(srcNodeModules, destNodeModules, 'dir');
-      } catch (err) {
-        console.error('❌ Erreur critique symlink node_modules:', err.message);
+        if (fs.existsSync(destNodeModules) || fs.lstatSync(destNodeModules).isSymbolicLink()) {
+          console.log(`[SYMLINK] Suppression de l'ancien node_modules ou lien mort vers ${destNodeModules}...`);
+          fs.rmSync(destNodeModules, { recursive: true, force: true });
+        }
+      } catch (e) {
+        // Ignorer si n'existe pas
       }
-    }
+
+      if (fs.existsSync(srcNodeModules)) {
+        console.log(`[SYMLINK] Création du lien symbolique node_modules : ${srcNodeModules} -> ${destNodeModules}`);
+        try {
+          fs.symlinkSync(srcNodeModules, destNodeModules, 'dir');
+        } catch (err) {
+          console.warn(`[SYMLINK] Avertissement symlink node_modules :`, err.message);
+        }
+      }
 
     // 3. Compile responses from Convex
     console.log(`[CONVEX] Chargement des réponses pour Whatoo ${whatooId}...`);
@@ -831,10 +890,13 @@ MASTER_PORT="${process.env.PORT || 3000}"
       console.log(`[PM2] Nettoyage ancien processus whatoo_${whatooId}...`);
       await runPm2(`delete whatoo_${whatooId}`).catch(() => {});
 
-      console.log(`[PM2] Lancement de index.js pour whatoo_${whatooId} depuis ${instanceDir}...`);
-      const { stdout, stderr } = await runPm2(`start index.js --name whatoo_${whatooId}`, {
-        cwd: instanceDir
-      });
+      const targetScript = path.join(instanceDir, 'index.js');
+      if (!fs.existsSync(targetScript)) {
+        throw new Error(`[CRITICAL] Fichier de démarrage introuvable sur le disque : ${targetScript}`);
+      }
+
+      console.log(`[PM2] Lancement de "${targetScript}" pour whatoo_${whatooId}...`);
+      const { stdout, stderr } = await runPm2(`start "${targetScript}" --name whatoo_${whatooId} --cwd "${instanceDir}"`);
       
       if (stdout) console.log(`[PM2 STDOUT]: ${stdout.trim()}`);
       if (stderr) console.warn(`[PM2 STDERR]: ${stderr.trim()}`);

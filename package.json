@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
+    "postinstall": "cd ren && npm install --omit=dev",
     "frontend-install": "npm init -y --prefix frontend && cd frontend && npm install && cd ..",
     "build": "cd frontend && npm install && npm run build"
   },
