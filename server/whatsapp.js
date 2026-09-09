@@ -7,6 +7,26 @@ import { api } from '../frontend/convex/_generated/api.js';
 
 const execPromise = util.promisify(exec);
 
+// Isolate PM2 to local writable directory to prevent EACCES errors on /root/.pm2
+const PM2_HOME_DIR = process.env.PM2_HOME || path.join(process.cwd(), '.pm2');
+if (!fs.existsSync(PM2_HOME_DIR)) {
+  try {
+    fs.mkdirSync(PM2_HOME_DIR, { recursive: true });
+  } catch (err) {}
+}
+process.env.PM2_HOME = PM2_HOME_DIR;
+
+const runPm2 = (cmd, options = {}) => {
+  return execPromise(`npx pm2 ${cmd}`, {
+    ...options,
+    env: {
+      ...process.env,
+      PM2_HOME: PM2_HOME_DIR,
+      ...(options.env || {})
+    }
+  });
+};
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -606,7 +626,7 @@ module.exports = {
         processData.watcher.close();
       }
       this.processes.delete(whatooId);
-      await execPromise(`npx pm2 delete whatoo_${whatooId}`).catch(() => {});
+      await runPm2(`delete whatoo_${whatooId}`).catch(() => {});
 
       const mainDir = path.join(__dirname, '..');
     const renDir = path.join(mainDir, 'ren');
@@ -809,12 +829,11 @@ MASTER_PORT="${process.env.PORT || 3000}"
     try {
       // Toujours pm2 delete d'abord (ignore l'erreur si n'existe pas) puis pm2 start
       console.log(`[PM2] Nettoyage ancien processus whatoo_${whatooId}...`);
-      await execPromise(`npx pm2 delete whatoo_${whatooId}`).catch(() => {});
+      await runPm2(`delete whatoo_${whatooId}`).catch(() => {});
 
       console.log(`[PM2] Lancement de index.js pour whatoo_${whatooId} depuis ${instanceDir}...`);
-      const { stdout, stderr } = await execPromise(`npx pm2 start index.js --name whatoo_${whatooId}`, {
-        cwd: instanceDir,
-        env: { ...process.env }
+      const { stdout, stderr } = await runPm2(`start index.js --name whatoo_${whatooId}`, {
+        cwd: instanceDir
       });
       
       if (stdout) console.log(`[PM2 STDOUT]: ${stdout.trim()}`);
@@ -1032,7 +1051,7 @@ MASTER_PORT="${process.env.PORT || 3000}"
 
     if (isFinalDeletion) {
       console.log(`[PM2] Suppression définitive de l'instance Whatoo ${whatooId}...`);
-      await execPromise(`npx pm2 delete whatoo_${whatooId}`).catch(() => {});
+      await runPm2(`delete whatoo_${whatooId}`).catch(() => {});
 
       // Attendre 1.5s pour que PM2 libère complètement les fichiers verrouillés
       await new Promise(resolve => setTimeout(resolve, 1500));
@@ -1048,7 +1067,7 @@ MASTER_PORT="${process.env.PORT || 3000}"
       }
     } else {
       console.log(`[PM2] Arrêt de l'instance Whatoo ${whatooId}...`);
-      await execPromise(`npx pm2 stop whatoo_${whatooId}`).catch(() => {});
+      await runPm2(`stop whatoo_${whatooId}`).catch(() => {});
 
       // Attendre 1s pour que PM2 libère les verrous de fichiers
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1082,7 +1101,7 @@ MASTER_PORT="${process.env.PORT || 3000}"
   async logoutInstance(whatooId, client) {
     // 1. Stop and Delete the PM2 process to ensure session files are not locked
     console.log(`[LOGOUT] Arrêt et suppression PM2 pour ${whatooId} avant nettoyage session...`);
-    await execPromise(`npx pm2 delete whatoo_${whatooId}`).catch(() => {});
+    await runPm2(`delete whatoo_${whatooId}`).catch(() => {});
 
     // Attendre 1.5s pour que PM2 libère complètement les fichiers
     await new Promise(resolve => setTimeout(resolve, 1500));

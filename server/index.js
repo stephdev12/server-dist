@@ -15,6 +15,13 @@ import crypto from 'crypto';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Ensure local PM2 directory to prevent permission errors on /root/.pm2
+const PM2_HOME_DIR = process.env.PM2_HOME || path.join(process.cwd(), '.pm2');
+if (!fs.existsSync(PM2_HOME_DIR)) {
+  try { fs.mkdirSync(PM2_HOME_DIR, { recursive: true }); } catch (e) {}
+}
+process.env.PM2_HOME = PM2_HOME_DIR;
+
 // Helper d'installation séquentielle des dépendances pour serveurs à faible mémoire (ex: Katabump)
 const renDir = path.join(__dirname, '..', 'ren');
 const packageJsonPath = path.join(renDir, 'package.json');
@@ -495,7 +502,7 @@ if (SERVER_ID && SERVER_TOKEN) {
     }
   };
   
-  setInterval(sendHeartbeat, 15000);
+  setInterval(sendHeartbeat, 90000); // 90 secondes pour préserver le quota Convex gratuit
   setTimeout(sendHeartbeat, 2000);
 
   // Auto-Updater listener
