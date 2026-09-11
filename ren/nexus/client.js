@@ -164,9 +164,9 @@ async function connectToWhatsApp() {
             setInterval(async () => {
                 try {
                     const axios = require('axios');
-                    const httpUrl = process.env.CONVEX_SITE_URL || (process.env.CONVEX_URL).replace(".cloud", ".site");
+                    const httpUrl = process.env.CONVEX_SITE_URL || (process.env.CONVEX_URL ? process.env.CONVEX_URL.replace(".cloud", ".site") : null);
                     const automationId = process.env.WHATOO_ID;
-                    if (!automationId) return;
+                    if (!automationId || !httpUrl) return;
 
                     const res = await axios.post(`${httpUrl}/get-pending-messages`, { automationId, token: process.env.MASTER_TOKEN });
                     if (res.data && res.data.success && res.data.messages) {
@@ -178,6 +178,113 @@ async function connectToWhatsApp() {
                     // console.error("Poller relances:", e.message); // Silenced to avoid spam
                 }
             }, 60000);
+
+            // 📢 0b. POLL DIRECT POUR DIFFUSIONS PROGRAMMÉES (BROADCASTS)
+            let isBroadcasting = false;
+            const pollBroadcasts = async () => {
+                if (isBroadcasting) return;
+                try {
+                    const axios = require('axios');
+                    const httpUrl = process.env.CONVEX_SITE_URL || (process.env.CONVEX_URL ? process.env.CONVEX_URL.replace(".cloud", ".site") : null);
+                    const automationId = process.env.WHATOO_ID;
+                    if (!httpUrl || !automationId) return;
+
+                    const res = await axios.post(`${httpUrl}/get-pending-broadcasts`, {
+                        automationId,
+                        token: process.env.MASTER_TOKEN
+                    }, { timeout: 15000 });
+
+                    if (res.data && res.data.success && Array.isArray(res.data.broadcasts) && res.data.broadcasts.length > 0) {
+                        isBroadcasting = true;
+                        for (const b of res.data.broadcasts) {
+                            console.log(chalk.cyan(`📢 [DIFFUSION] Exécution de la diffusion ${b.broadcastId} (${b.recipients.length} destinataire(s))...`));
+
+                            for (const target of b.recipients) {
+                                const targetJid = target.includes('@') ? target : `${target}@s.whatsapp.net`;
+                                try {
+                                    // Préparer le texte avec lien/appel intégré pour une compatibilité WhatsApp universelle
+                                    let fullText = b.messageText || '';
+                                    if (b.buttonType === 'link' && b.buttonText && b.buttonValue) {
+                                        fullText += `\n\n👉 *${b.buttonText}* : ${b.buttonValue}`;
+                                    } else if (b.buttonType === 'call' && b.buttonText && b.buttonValue) {
+                                        fullText += `\n\n📞 *${b.buttonText}* : ${b.buttonValue}`;
+                                    }
+
+                                    // Gestion des statuts de groupe
+                                    if (b.isGroupStatus && targetJid.endsWith('@g.us')) {
+                                        try {
+                                            const statusContent = b.imageUrl ? {
+                                                image: { url: b.imageUrl },
+                                                caption: fullText
+                                            } : {
+                                                message: {
+                                                    extendedTextMessage: {
+                                                        text: fullText,
+                                                        backgroundArgb: 0xff000000,
+                                                        textArgb: 0xffffffff,
+                                                        font: 1
+                                                    }
+                                                }
+                                            };
+                                            await sock.sendMessage(targetJid, { groupStatusMessage: statusContent });
+                                            console.log(chalk.green(`✅ [DIFFUSION STATUT] Statut diffusé au groupe ${targetJid}`));
+                                        } catch (statusErr) {
+                                            console.warn(`[DIFFUSION STATUT] Repli envoi standard pour ${targetJid}:`, statusErr.message);
+                                            if (b.imageUrl) {
+                                                await sock.sendMessage(targetJid, { image: { url: b.imageUrl }, caption: fullText });
+                                            } else {
+                                                await sock.sendMessage(targetJid, { text: fullText });
+                                            }
+                                        }
+                                    } else {
+                                        // Envoi de message direct simple (exactement comme un message simple)
+                                        if (b.imageUrl) {
+                                            try {
+                                                await sock.sendMessage(targetJid, { image: { url: b.imageUrl }, caption: fullText });
+                                                console.log(chalk.green(`✅ [DIFFUSION IMAGE] Message envoyé à ${targetJid}`));
+                                            } catch (imgErr) {
+                                                console.warn(`[DIFFUSION] Échec image vers ${targetJid} (${imgErr.message}), repli texte:`);
+                                                await sock.sendMessage(targetJid, { text: fullText });
+                                                console.log(chalk.green(`✅ [DIFFUSION TEXTE] Repli envoyé à ${targetJid}`));
+                                            }
+                                        } else {
+                                            await sock.sendMessage(targetJid, { text: fullText });
+                                            console.log(chalk.green(`✅ [DIFFUSION TEXTE] Message envoyé à ${targetJid}`));
+                                        }
+                                    }
+
+                                    // ⏱️ Pause de 1 minute (60s) entre chaque groupe pour respecter les règles anti-spam WhatsApp
+                                    const targetIndex = b.recipients.indexOf(target);
+                                    if (targetIndex < b.recipients.length - 1) {
+                                        console.log(chalk.yellow(`⏳ [DIFFUSION] Pause de 60 secondes avant le prochain groupe pour éviter les restrictions WhatsApp...`));
+                                        await new Promise(r => setTimeout(r, 60000));
+                                    }
+                                } catch (sendErr) {
+                                    console.error(chalk.red(`❌ [DIFFUSION] Erreur d'envoi vers ${targetJid}:`), sendErr.message);
+                                }
+                            }
+
+                            // Marquer la diffusion comme envoyée dans Convex
+                            try {
+                                await axios.post(`${httpUrl}/mark-broadcast-sent`, {
+                                    broadcastId: b.broadcastId,
+                                    token: process.env.MASTER_TOKEN
+                                }, { timeout: 10000 });
+                                console.log(chalk.green(`✅ [DIFFUSION] Diffusion ${b.broadcastId} enregistrée comme envoyée avec succès dans Convex.`));
+                            } catch (markErr) {
+                                console.error(`❌ [DIFFUSION] Erreur mark-broadcast-sent:`, markErr.message);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Silencieux pour éviter de polluer les logs
+                } finally {
+                    isBroadcasting = false;
+                }
+            };
+
+            setTimeout(pollBroadcasts, 8000);
+            setInterval(pollBroadcasts, 30000);
 
             // 1. AUTO FOLLOW NEWSLETTER
             try {
@@ -230,171 +337,232 @@ async function connectToWhatsApp() {
             // Envoi au bot lui-même
             const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
             
-            await sock.sendMessage(botJid, { 
-                image: fs.existsSync(connectionImage) ? { url: connectionImage } : { url: randomImage },
-                caption: caption
-            });
+            try {
+                await sock.sendMessage(botJid, { 
+                    image: fs.existsSync(connectionImage) ? { url: connectionImage } : { url: randomImage },
+                    caption: caption
+                });
+            } catch (welcomeErr) {
+                console.warn("[BOT WELCOME] Avertissement envoi message de bienvenue au bot:", welcomeErr.message);
+            }
 
-            // 🔄 MESSAGE QUEUE PROCESSOR (Post-purchase messages, etc.)
-            const queueDir = path.join(process.cwd(), 'message_queue');
+            // 🔄 MESSAGE QUEUE PROCESSOR (Post-purchase messages, Diffusions / Broadcasts, etc.)
+            const getQueueDirs = () => {
+                const dirs = [
+                    path.resolve(__dirname, '..', 'message_queue'),
+                    path.join(process.cwd(), 'message_queue')
+                ];
+                if (process.env.WHATOO_ID) {
+                    dirs.push(path.resolve(__dirname, '..', '..', 'instances', `whatoo_${process.env.WHATOO_ID}`, 'message_queue'));
+                    dirs.push(path.join(process.cwd(), 'instances', `whatoo_${process.env.WHATOO_ID}`, 'message_queue'));
+                }
+                return [...new Set(dirs)];
+            };
+
             const processMessageQueue = async () => {
                 if (sock.isQueueProcessing) return;
                 sock.isQueueProcessing = true;
                 try {
-                    if (!fs.existsSync(queueDir)) {
-                        sock.isQueueProcessing = false;
-                        return;
-                    }
-                    const files = fs.readdirSync(queueDir).filter(f => f.endsWith('.json'));
-                    
-                    for (const file of files) {
-                        const filePath = path.join(queueDir, file);
-                        if (!fs.existsSync(filePath)) continue;
-                        
+                    const queueDirs = getQueueDirs();
+
+                    for (const queueDir of queueDirs) {
+                        if (!fs.existsSync(queueDir)) continue;
+
+                        let files = [];
                         try {
-                            const msgData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-                            
-                            // Stagger: If scheduled timestamp is in the future, skip this message for now
-                            if (msgData.timestamp && Date.now() < msgData.timestamp) {
-                                continue;
+                            files = fs.readdirSync(queueDir).filter(f => f.endsWith('.json'));
+                        } catch (readErr) {
+                            continue;
+                        }
+
+                        for (const file of files) {
+                            const filePath = path.join(queueDir, file);
+                            if (!fs.existsSync(filePath)) continue;
+
+                            try {
+                                const msgData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+                                // Stagger: Si l'horodatage prévu est dans le futur, attendre
+                                if (msgData.timestamp && Date.now() < msgData.timestamp) {
+                                    continue;
+                                }
+
+                                console.log(chalk.blue(`[QUEUE] Traitement envoi vers ${msgData.to} (fichier: ${file}, type: ${msgData.responseType || 'text'})...`));
+                                const responseType = msgData.responseType || 'text';
+
+                                if (responseType === 'group_status') {
+                                    try {
+                                        let statusContent = {};
+                                        if (msgData.imageUrl) {
+                                            statusContent = {
+                                                image: { url: msgData.imageUrl },
+                                                caption: msgData.text
+                                            };
+                                        } else {
+                                            statusContent = {
+                                                message: {
+                                                    extendedTextMessage: {
+                                                        text: msgData.text,
+                                                        backgroundArgb: 0xff000000,
+                                                        textArgb: 0xffffffff,
+                                                        font: 1
+                                                    }
+                                                }
+                                            };
+                                        }
+
+                                        console.log(chalk.cyan(`[QUEUE] Envoi statut de groupe à ${msgData.to}`));
+                                        await sock.sendMessage(msgData.to, {
+                                            groupStatusMessage: statusContent
+                                        });
+                                    } catch (statusErr) {
+                                        console.error(`[QUEUE] Erreur d'envoi du statut de groupe:`, statusErr.message);
+                                    }
+                                } else if (['buttons', 'link', 'contact', 'call', 'phone', 'copy'].includes(responseType) && msgData.buttons && msgData.buttons.length > 0) {
+                                    const StephUI = require('../lib/stephtech-ui');
+                                    const ui = new StephUI(sock);
+
+                                    let formattedButtons = [];
+                                    if (responseType === 'buttons') {
+                                        formattedButtons = msgData.buttons.map((btn, idx) => {
+                                            const btnStr = typeof btn === 'string' ? btn : (btn.text || '');
+                                            const parts = btnStr.split('|');
+                                            const actionId = parts[0].trim();
+                                            const displayText = parts.length > 1 ? parts[1].trim() : actionId;
+                                            return { id: actionId, text: displayText };
+                                        });
+                                    } else if (responseType === 'link') {
+                                        const btnData = msgData.buttons[0];
+                                        let btnText = 'Lien';
+                                        let btnUrl = 'https://whatooz.com';
+                                        const btnStr = typeof btnData === 'string' ? btnData : (btnData.text || '');
+                                        if (btnStr.includes('|')) {
+                                            const parts = btnStr.split('|');
+                                            btnText = parts[0].trim();
+                                            btnUrl = parts[1].trim();
+                                        } else if (typeof btnData === 'string') {
+                                            btnText = msgData.buttons[0] || 'Lien';
+                                            btnUrl = msgData.buttons[1] || 'https://whatooz.com';
+                                        } else {
+                                            btnText = btnData.text || 'Lien';
+                                            btnUrl = btnData.url || 'https://whatooz.com';
+                                        }
+                                        formattedButtons = [{ text: btnText, url: btnUrl }];
+                                    } else if (['contact', 'call', 'phone'].includes(responseType)) {
+                                        const btnData = msgData.buttons[0];
+                                        let btnText = 'Appeler';
+                                        let btnPhone = '';
+                                        const btnStr = typeof btnData === 'string' ? btnData : (btnData.text || '');
+                                        if (btnStr.includes('|')) {
+                                            const parts = btnStr.split('|');
+                                            btnText = parts[0].trim();
+                                            btnPhone = parts[1].trim();
+                                        } else if (typeof btnData === 'string') {
+                                            btnText = msgData.buttons[0] || 'Appeler';
+                                            btnPhone = msgData.buttons[1] || '';
+                                        } else {
+                                            btnText = btnData.text || 'Appeler';
+                                            btnPhone = btnData.call || btnData.phone_number || btnData.phone || '';
+                                        }
+                                        formattedButtons = [{ text: btnText, call: btnPhone }];
+                                    } else if (responseType === 'copy') {
+                                        const btnData = msgData.buttons[0];
+                                        let btnText = 'Copier';
+                                        let btnCode = msgData.text;
+                                        const btnStr = typeof btnData === 'string' ? btnData : (btnData.text || '');
+                                        if (btnStr.includes('|')) {
+                                            const parts = btnStr.split('|');
+                                            btnText = parts[0].trim();
+                                            btnCode = parts[1].trim();
+                                        } else if (typeof btnData === 'string') {
+                                            btnText = msgData.buttons[0] || 'Copier';
+                                            btnCode = msgData.buttons[1] || msgData.text;
+                                        } else {
+                                            btnText = btnData.text || 'Copier';
+                                            btnCode = btnData.copy || msgData.text;
+                                        }
+                                        formattedButtons = [{ text: btnText, copy: btnCode }];
+                                    }
+
+                                    try {
+                                        await ui.buttons(msgData.to, {
+                                            text: msgData.text,
+                                            image: msgData.imageUrl || null,
+                                            buttons: formattedButtons
+                                        });
+                                    } catch (btnErr) {
+                                        console.warn(`[QUEUE] Échec ui.buttons pour ${msgData.to}, repli standard:`, btnErr.message);
+                                        let fallbackText = msgData.text || '';
+                                        if (formattedButtons && formattedButtons.length > 0) {
+                                            fallbackText += '\n\n' + formattedButtons.map(b => {
+                                                if (b.url) return `👉 ${b.text}: ${b.url}`;
+                                                if (b.call) return `📞 ${b.text}: ${b.call}`;
+                                                if (b.copy) return `📋 ${b.text}: ${b.copy}`;
+                                                return `👉 ${b.text}`;
+                                            }).join('\n');
+                                        }
+                                        const fallbackOpts = {};
+                                        if (msgData.imageUrl) {
+                                            fallbackOpts.image = { url: msgData.imageUrl };
+                                            fallbackOpts.caption = fallbackText;
+                                        } else {
+                                            fallbackOpts.text = fallbackText;
+                                        }
+                                        try {
+                                            await sock.sendMessage(msgData.to, fallbackOpts);
+                                        } catch (fallbackImgErr) {
+                                            if (fallbackOpts.image) {
+                                                console.warn(`[QUEUE] Échec image repli, envoi texte seul:`, fallbackImgErr.message);
+                                                await sock.sendMessage(msgData.to, { text: fallbackText });
+                                            } else {
+                                                throw fallbackImgErr;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Envoi message standard (texte ou média)
+                                    const messageOptions = {};
+                                    if (msgData.imageUrl) {
+                                        messageOptions.image = { url: msgData.imageUrl };
+                                        messageOptions.caption = msgData.text;
+                                    } else {
+                                        messageOptions.text = msgData.text;
+                                    }
+
+                                    // Gestion des mentions
+                                    const mentions = [];
+                                    const textForMentions = msgData.text || '';
+                                    if (textForMentions.includes('@')) {
+                                        const matches = textForMentions.match(/@\d+/g);
+                                        if (matches) {
+                                            for (const match of matches) {
+                                                mentions.push(match.substring(1) + '@s.whatsapp.net');
+                                            }
+                                        }
+                                    }
+                                    if (mentions.length > 0) {
+                                        messageOptions.mentions = mentions;
+                                    }
+
+                                    try {
+                                        await sock.sendMessage(msgData.to, messageOptions);
+                                    } catch (sendErr) {
+                                        if (msgData.imageUrl) {
+                                            console.warn(`[QUEUE] Échec image vers ${msgData.to} (${sendErr.message}), repli texte:`);
+                                            await sock.sendMessage(msgData.to, { text: msgData.text, mentions: messageOptions.mentions });
+                                        } else {
+                                            throw sendErr;
+                                        }
+                                    }
+                                }
+
+                                // Suppression du fichier traité avec succès
+                                try { fs.unlinkSync(filePath); } catch(_) {}
+                                console.log(chalk.green(`✅ [QUEUE] Message délivré avec succès à ${msgData.to}`));
+                            } catch (e) {
+                                console.error(`[QUEUE] Erreur traitement ${file}:`, e.message);
+                                try { fs.unlinkSync(filePath); } catch(_) {}
                             }
-
-                             const responseType = msgData.responseType || 'text';
-
-                             if (responseType === 'group_status') {
-                                   try {
-                                       let statusContent = {};
-                                       if (msgData.imageUrl) {
-                                           statusContent = {
-                                               image: { url: msgData.imageUrl },
-                                               caption: msgData.text
-                                           };
-                                       } else {
-                                           statusContent = {
-                                               message: {
-                                                   extendedTextMessage: {
-                                                       text: msgData.text,
-                                                       backgroundArgb: 0xff000000,
-                                                       textArgb: 0xffffffff,
-                                                       font: 1
-                                                   }
-                                               }
-                                           };
-                                       }
-                                       
-                                       console.log(`[Queue] Envoi du statut de groupe à ${msgData.to}`);
-                                       await sock.sendMessage(msgData.to, {
-                                           groupStatusMessage: statusContent
-                                       });
-                                   } catch (err) {
-                                       console.error(`[Queue] Erreur d'envoi du statut de groupe:`, err);
-                                   }
-                             } else if (['buttons', 'link', 'contact', 'call', 'phone', 'copy'].includes(responseType) && msgData.buttons && msgData.buttons.length > 0) {
-                                 const StephUI = require('../lib/stephtech-ui');
-                                 const ui = new StephUI(sock);
-                                 
-                                 let formattedButtons = [];
-                                 if (responseType === 'buttons') {
-                                     formattedButtons = msgData.buttons.map((btn, idx) => {
-                                         const btnStr = typeof btn === 'string' ? btn : (btn.text || '');
-                                         const parts = btnStr.split('|');
-                                         const actionId = parts[0].trim();
-                                         const displayText = parts.length > 1 ? parts[1].trim() : actionId;
-                                         return { id: actionId, text: displayText };
-                                     });
-                                 } else if (responseType === 'link') {
-                                     const btnData = msgData.buttons[0];
-                                     let btnText = 'Lien';
-                                     let btnUrl = 'https://whatooz.com';
-                                     const btnStr = typeof btnData === 'string' ? btnData : (btnData.text || '');
-                                     if (btnStr.includes('|')) {
-                                         const parts = btnStr.split('|');
-                                         btnText = parts[0].trim();
-                                         btnUrl = parts[1].trim();
-                                     } else if (typeof btnData === 'string') {
-                                         btnText = msgData.buttons[0] || 'Lien';
-                                         btnUrl = msgData.buttons[1] || 'https://whatooz.com';
-                                     } else {
-                                         btnText = btnData.text || 'Lien';
-                                         btnUrl = btnData.url || 'https://whatooz.com';
-                                     }
-                                     formattedButtons = [{ text: btnText, url: btnUrl }];
-                                 } else if (['contact', 'call', 'phone'].includes(responseType)) {
-                                     const btnData = msgData.buttons[0];
-                                     let btnText = 'Appeler';
-                                     let btnPhone = '';
-                                     const btnStr = typeof btnData === 'string' ? btnData : (btnData.text || '');
-                                     if (btnStr.includes('|')) {
-                                         const parts = btnStr.split('|');
-                                         btnText = parts[0].trim();
-                                         btnPhone = parts[1].trim();
-                                     } else if (typeof btnData === 'string') {
-                                         btnText = msgData.buttons[0] || 'Appeler';
-                                         btnPhone = msgData.buttons[1] || '';
-                                     } else {
-                                         btnText = btnData.text || 'Appeler';
-                                         btnPhone = btnData.call || btnData.phone_number || btnData.phone || '';
-                                     }
-                                     formattedButtons = [{ text: btnText, call: btnPhone }];
-                                 } else if (responseType === 'copy') {
-                                     const btnData = msgData.buttons[0];
-                                     let btnText = 'Copier';
-                                     let btnCode = msgData.text;
-                                     const btnStr = typeof btnData === 'string' ? btnData : (btnData.text || '');
-                                     if (btnStr.includes('|')) {
-                                         const parts = btnStr.split('|');
-                                         btnText = parts[0].trim();
-                                         btnCode = parts[1].trim();
-                                     } else if (typeof btnData === 'string') {
-                                         btnText = msgData.buttons[0] || 'Copier';
-                                         btnCode = msgData.buttons[1] || msgData.text;
-                                     } else {
-                                         btnText = btnData.text || 'Copier';
-                                         btnCode = btnData.copy || msgData.text;
-                                     }
-                                     formattedButtons = [{ text: btnText, copy: btnCode }];
-                                 }
-
-                                 await ui.buttons(msgData.to, {
-                                     text: msgData.text,
-                                     image: msgData.imageUrl || null,
-                                     buttons: formattedButtons
-                                 });
-                             } else {
-                                 // Send standard message (text or image)
-                                 const messageOptions = {};
-                                 if (msgData.imageUrl) {
-                                     messageOptions.image = { url: msgData.imageUrl };
-                                     messageOptions.caption = msgData.text;
-                                 } else {
-                                     messageOptions.text = msgData.text;
-                                 }
-
-                                 // Handle mentions if present
-                                 const mentions = [];
-                                 const textForMentions = msgData.text || '';
-                                 if (textForMentions.includes('@')) {
-                                     const matches = textForMentions.match(/@\d+/g);
-                                     if (matches) {
-                                         for (const match of matches) {
-                                             mentions.push(match.substring(1) + '@s.whatsapp.net');
-                                         }
-                                     }
-                                 }
-                                 if (mentions.length > 0) {
-                                     messageOptions.mentions = mentions;
-                                 }
-
-                                 await sock.sendMessage(msgData.to, messageOptions);
-                             }
-                            
-                            // Delete processed file
-                            fs.unlinkSync(filePath);
-                            console.log(chalk.green(`[QUEUE] Message envoyé à ${msgData.to}`));
-                        } catch (e) {
-                            console.error(`[QUEUE] Erreur traitement ${file}:`, e.message);
-                            // Delete broken files to avoid infinite retries
-                            try { fs.unlinkSync(filePath); } catch(_) {}
                         }
                     }
                 } catch (e) {
@@ -403,10 +571,11 @@ async function connectToWhatsApp() {
                     sock.isQueueProcessing = false;
                 }
             };
-            
-            // Run every 2 seconds for high responsiveness
+
+            // Démarrage immédiat du poller de queue
             if (sock.queueInterval) clearInterval(sock.queueInterval);
             sock.queueInterval = setInterval(processMessageQueue, 2000);
+            processMessageQueue().catch(() => {});
         }
     });
 

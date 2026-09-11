@@ -472,10 +472,12 @@ module.exports = {
              buttons.push({ id: "custom_link", text: "🌐 Voir en ligne", type: "url", url: p.paymentLink });
            }
 
+           const productImg = (p.imageUrl && p.imageUrl.trim().length > 0) ? p.imageUrl.trim() : ((catalog.imageUrl && catalog.imageUrl.trim().length > 0) ? catalog.imageUrl.trim() : "https://dummyimage.com/600x400/000/fff&text=Produit");
+
            return {
              title: p.name.substring(0, 20),
              body: `Prix: ${p.price || 0} FCFA\n${p.description || ''}`,
-             image: p.imageUrl || "https://dummyimage.com/600x400/000/fff&text=Produit",
+             image: productImg,
              buttons: buttons
            };
         });
@@ -565,9 +567,10 @@ module.exports = {
                   return;
                 }
                 
+                const detailImg = (p.imageUrl && p.imageUrl.trim().length > 0) ? p.imageUrl.trim() : ((catalog.imageUrl && catalog.imageUrl.trim().length > 0) ? catalog.imageUrl.trim() : undefined);
                 await ui.buttons(message.key.remoteJid, {
                   text: \`*\${p.name.replace(/["\`]/g, "'")}*\\n\\n\${(p.description || '').replace(/["\`]/g, "'")}\\n\\nPrix: *\${p.price} FCFA*\`,
-                  image: p.imageUrl,
+                  image: detailImg,
                   buttons: [
                     { id: \`.buy_${catalogId}_${catIdx}_\${p.originalIndex}\`, text: "🛒 Acheter" }
                   ]
@@ -613,11 +616,12 @@ module.exports = {
                   }
 
                   const data = resData;
+                  const checkoutLink = data.link || "https://whatooz.com";
                   await client.sendMessage(message.key.remoteJid, {
-                    text: \`💳 *Finalisez l'achat de : ${p.name.replace(/'/g, '')}*\\n💰 Montant : *\${data.amount || ${p.price}} FCFA*\\n\\nCliquez sur le bouton ci-dessous pour payer. Une fois le paiement réussi, revenez ici !\`,
+                    text: \`💳 *Finalisez l'achat de : ${p.name.replace(/'/g, '')}*\\n💰 Montant : *\${data.amount || ${p.price}} FCFA*\\n\\nCliquez sur le lien sécurisé ci-dessous pour payer directement sur la page SasPay :\\n🔗 \${checkoutLink}\\n\\nUne fois le paiement effectué, votre commande sera automatiquement validée !\`,
                     buttons: [
                       {
-                        url: data.link || "https://whatooz.com",
+                        url: checkoutLink,
                         text: "🔒 Payer Maintenant"
                       }
                     ]
@@ -674,14 +678,16 @@ module.exports = {
       console.log(`Clonage du bot REN master vers ${instanceDir}...`);
       this.copyFolderRecursive(renDir, instanceDir);
 
-      // Garantir impérativement la présence des fichiers clés (index.js, package.json, config.js)
-      const essentialFiles = ['index.js', 'package.json', 'config.js'];
+      // Garantir impérativement la présence des fichiers clés (index.js, package.json, config.js, nexus/client.js)
+      const essentialFiles = ['index.js', 'package.json', 'config.js', path.join('nexus', 'client.js')];
       for (const f of essentialFiles) {
         const srcF = path.join(renDir, f);
         const destF = path.join(instanceDir, f);
-        if (fs.existsSync(srcF) && (!fs.existsSync(destF) || fs.statSync(destF).size === 0)) {
-          console.log(`[BOT INIT] Copie directe de secours pour ${f} vers ${destF}...`);
+        if (fs.existsSync(srcF)) {
+          console.log(`[BOT INIT] Synchronisation directe pour ${f} vers ${destF}...`);
           try {
+            const destSubDir = path.dirname(destF);
+            if (!fs.existsSync(destSubDir)) fs.mkdirSync(destSubDir, { recursive: true });
             fs.copyFileSync(srcF, destF);
           } catch (copyErr) {
             console.error(`[BOT INIT] Erreur copie secours ${f}:`, copyErr.message);
@@ -1078,6 +1084,20 @@ MASTER_PORT="${process.env.PORT || 3000}"
         });
         fs.writeFileSync(path.join(instanceDir, 'ai_context.json'), JSON.stringify(aiContext, null, 2));
 
+        // Assurer que le dernier nexus/client.js est synchronisé dans l'instance
+        const masterClient = path.join(mainDir, 'ren', 'nexus', 'client.js');
+        const instClient = path.join(instanceDir, 'nexus', 'client.js');
+        if (fs.existsSync(masterClient)) {
+          try {
+            const clientDir = path.dirname(instClient);
+            if (!fs.existsSync(clientDir)) fs.mkdirSync(clientDir, { recursive: true });
+            fs.copyFileSync(masterClient, instClient);
+            console.log(`[BOT UPDATE] nexus/client.js synchronisé dans l'instance ${whatooId}`);
+          } catch (copyErr) {
+            console.warn(`[BOT UPDATE] Avertissement copie nexus/client.js:`, copyErr.message);
+          }
+        }
+
         console.log(`Plugins Whatoo ${whatooId} réécrits avec succès !`);
       } catch (err) {
         console.error(`Erreur réécriture plugins Whatoo ${whatooId}:`, err.message);
@@ -1114,26 +1134,16 @@ MASTER_PORT="${process.env.PORT || 3000}"
     if (isFinalDeletion) {
       console.log(`[PM2] Suppression définitive de l'instance Whatoo ${whatooId}...`);
       await runPm2(`delete whatoo_${whatooId}`).catch(() => {});
-
-      // Attendre 1.5s pour que PM2 libère complètement les fichiers verrouillés
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      // Supprimer tout le dossier instance
       if (fs.existsSync(instanceDir)) {
         try {
           fs.rmSync(instanceDir, { recursive: true, force: true });
-          console.log(`[FS] Dossier de l'instance ${whatooId} supprimé.`);
         } catch (e) {
-          console.error(`Erreur suppression dossier instance ${whatooId}:`, e.message);
+          console.error(`Erreur suppression dossier ${instanceDir}:`, e.message);
         }
       }
     } else {
       console.log(`[PM2] Arrêt de l'instance Whatoo ${whatooId}...`);
       await runPm2(`stop whatoo_${whatooId}`).catch(() => {});
-
-      // Attendre 1s pour que PM2 libère les verrous de fichiers
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
       // Nettoyer le dossier session pour forcer un nouveau pairage à la réactivation
       const sessionDir = path.join(instanceDir, 'session');
       if (fs.existsSync(sessionDir)) {
@@ -1244,8 +1254,11 @@ MASTER_PORT="${process.env.PORT || 3000}"
     const instanceDir = path.join(mainDir, 'instances', `whatoo_${whatooId}`);
     const queueDir = path.join(instanceDir, 'message_queue');
     
-    if (!fs.existsSync(instanceDir)) return;
-    if (!fs.existsSync(queueDir)) fs.mkdirSync(queueDir, { recursive: true });
+    if (!fs.existsSync(instanceDir)) {
+      console.warn(`[QUEUE] Attention : instance ${whatooId} non trouvée (${instanceDir}), création automatique...`);
+      fs.mkdirSync(instanceDir, { recursive: true, mode: 0o777 });
+    }
+    if (!fs.existsSync(queueDir)) fs.mkdirSync(queueDir, { recursive: true, mode: 0o777 });
 
     const msgFile = {
       to: buyerWhatsApp.includes('@') ? buyerWhatsApp : `${buyerWhatsApp}@s.whatsapp.net`,
@@ -1257,8 +1270,9 @@ MASTER_PORT="${process.env.PORT || 3000}"
     };
 
     const fileName = `msg_${Date.now() + delayMs}_${Math.random().toString(36).substring(2, 8)}.json`;
-    fs.writeFileSync(path.join(queueDir, fileName), JSON.stringify(msgFile, null, 2));
-    console.log(`[QUEUE] Message en file d'attente pour ${buyerWhatsApp} (différé de ${delayMs}ms) dans l'instance ${whatooId}`);
+    const targetPath = path.join(queueDir, fileName);
+    fs.writeFileSync(targetPath, JSON.stringify(msgFile, null, 2));
+    console.log(`[QUEUE] Message en file d'attente pour ${buyerWhatsApp} (différé de ${delayMs}ms) dans : ${targetPath}`);
   }
 }
 
