@@ -158,15 +158,11 @@ Ne rajoute aucune explication ni ponctuation. Seulement le trigger ou NO_MATCH.`
     }
 
     // --- NO INTENT MATCH FOUND ---
-    // If conversation mode is enabled, we use OpenRouter to generate a natural chat reply
-    if (auto.aiConversationModeEnabled) {
-      console.log(`[AI CHAT] Aucune intention e-commerce directe. Mode Conversation actif. Appel OpenRouter pour ${automationId}...`);
-      
-      const openrouterApiKey = process.env.OPENROUTER_API_KEY;
-      if (!openrouterApiKey) {
-        console.warn("[AI CHAT] OPENROUTER_API_KEY non configurée dans .env.");
-        return res.json({ success: true, trigger: null, chatReply: "Désolé, le service de conversation IA n'est pas configuré." });
-      }
+    // Strictly verify both master AI and Conversational AI are active
+    const isConvEnabled = Boolean(auto.aiModeEnabled) && (auto.aiConversationModeEnabled === true || auto.aiConversationModeEnabled === 'true');
+
+    if (isConvEnabled) {
+      console.log(`[AI CHAT] Aucune intention e-commerce directe. Mode Conversation actif. Génération réponse pour ${automationId}...`);
 
       // Fetch catalog to construct context
       let catalogContext = "";
@@ -197,7 +193,7 @@ Ne rajoute aucune explication ni ponctuation. Seulement le trigger ou NO_MATCH.`
           }
         }
       } catch (catErr) {
-        console.error(`[AI CHAT] Erreur de chargement du catalogue pour le bot ${automationId}:`);
+        console.error(`[AI CHAT] Erreur de chargement du catalogue pour le bot ${automationId}:`, catErr.message);
       }
 
       const baseInstructions = auto.customPrompt 
@@ -223,62 +219,77 @@ Consignes comportementales strictes :
         history = chatHistoryCache.get(cacheKey) || [];
       }
 
-      const openrouterMessages = [
-        { role: 'system', content: systemPrompt },
-        ...history,
-        { role: 'user', content: message }
-      ];
+      let reply = null;
 
-      const openrouterUrl = 'https://openrouter.ai/api/v1/chat/completions';
-      try {
-        const openrouterResponse = await axios.post(openrouterUrl, {
-          model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-          messages: openrouterMessages,
-          temperature: 0.7,
-          max_tokens: 500,
-          reasoning: { enabled: true }
-        }, {
-          headers: {
-            'Authorization': `Bearer ${openrouterApiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://whatooz.com',
-            'X-Title': 'Whatooz Agent'
+      // 1. Try OpenRouter if configured
+      const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+      if (openrouterApiKey) {
+        try {
+          const openrouterMessages = [
+            { role: 'system', content: systemPrompt },
+            ...history,
+            { role: 'user', content: message }
+          ];
+
+          const openrouterUrl = 'https://openrouter.ai/api/v1/chat/completions';
+          const openrouterResponse = await axios.post(openrouterUrl, {
+            model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+            messages: openrouterMessages,
+            temperature: 0.7,
+            max_tokens: 500,
+            reasoning: { enabled: true }
+          }, {
+            headers: {
+              'Authorization': `Bearer ${openrouterApiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://whatooz.com',
+              'X-Title': 'Whatooz Agent'
+            },
+            timeout: 10000
+          });
+
+          const messageObj = openrouterResponse.data?.choices?.[0]?.message;
+          reply = messageObj?.content?.trim();
+          if (reply) {
+            console.log(`[AI CHAT] Réponse OpenRouter pour ${automationId}: "${reply}"`);
           }
-        });
-
-        const messageObj = openrouterResponse.data?.choices?.[0]?.message;
-        const reply = messageObj?.content?.trim();
-        console.log(`[AI CHAT] Réponse OpenRouter pour ${automationId}: "${reply}"`);
-
-        if (reply) {
-          // Update rolling history cache
-          if (cacheKey) {
-            history.push({ role: 'user', content: message });
-            
-            const assistantMsg = {
-              role: 'assistant',
-              content: reply
-            };
-            if (messageObj && messageObj.reasoning_details) {
-              assistantMsg.reasoning_details = messageObj.reasoning_details;
-            }
-            history.push(assistantMsg);
-
-            if (history.length > 10) {
-              history = history.slice(history.length - 10);
-            }
-            chatHistoryCache.set(cacheKey, history);
-          }
-          return res.json({ success: true, trigger: null, chatReply: reply });
+        } catch (orErr) {
+          console.warn(`[AI CHAT] OpenRouter indisponible (${orErr.message}), bascule vers Gemini Flash...`);
         }
-      } catch (orErr) {
-        const orErrDetails = orErr?.response?.data || orErr.message;
-        console.error(`[AI CHAT] Erreur API OpenRouter :`, orErrDetails);
-        return res.json({ success: true, trigger: null, chatReply: "Désolé, je rencontre des difficultés pour répondre à votre message actuellement." });
       }
+
+      // 2. Fallback to Gemini 2.5 Flash if OpenRouter failed or not configured
+      if (!reply && ai) {
+        try {
+          console.log(`[AI CHAT] Génération via Gemini 2.5 Flash pour ${automationId}...`);
+          const geminiPrompt = `${systemPrompt}\n\nHistorique récent :\n${history.map(h => `${h.role}: ${h.content}`).join('\n')}\n\nClient : ${message}\nVendeur :`;
+          const geminiRes = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: geminiPrompt
+          });
+          reply = geminiRes.text?.trim();
+          if (reply) {
+            console.log(`[AI CHAT] Réponse Gemini Flash pour ${automationId}: "${reply}"`);
+          }
+        } catch (gemErr) {
+          console.error(`[AI CHAT] Erreur Gemini Flash :`, gemErr.message);
+        }
+      }
+
+      if (reply) {
+        if (cacheKey) {
+          history.push({ role: 'user', content: message });
+          history.push({ role: 'assistant', content: reply });
+          if (history.length > 10) history = history.slice(history.length - 10);
+          chatHistoryCache.set(cacheKey, history);
+        }
+        return res.json({ success: true, trigger: null, chatReply: reply });
+      }
+
+      return res.json({ success: true, trigger: null, chatReply: "Désolé, je rencontre une petite difficulté technique pour vous répondre actuellement. Un conseiller prendra le relais sous peu." });
     }
 
-    console.log(`[AI INTENT] Aucun match (NO_MATCH) pour : "${message}" et conversation désactivée.`);
+    console.log(`[AI INTENT] Aucun match (NO_MATCH) pour : "${message}" et conversation désactivée (aiMode: ${auto.aiModeEnabled}, aiConv: ${auto.aiConversationModeEnabled}).`);
     return res.json({ success: true, trigger: null });
 
   } catch (error) {
@@ -609,153 +620,11 @@ client.onUpdate(api.payments.listAllProductPurchases, {}, async (allPurchases) =
   }
 });
 
-// 5. Periodic Poller: Check active scheduled broadcasts and execute them
-setInterval(async () => {
-  try {
-    const activeBroadcasts = await client.query(api.broadcasts.listAllActive, { token: process.env.MASTER_TOKEN });
-    if (!activeBroadcasts || activeBroadcasts.length === 0) return;
+// 5. Note sur les diffusions programmées (Broadcasts):
+// Les diffusions programmées sont désormais traitées et envoyées directement par chaque instance de bot
+// connectée à WhatsApp (via ren/nexus/client.js -> /get-pending-broadcasts) avec sock.sendMessage,
+// exactement comme les messages simples et les relances automatiques.
 
-    for (const b of activeBroadcasts) {
-      const now = Date.now();
-      if (now < b.startDate) continue; // Not started yet
-
-      // Adjust date to client's local time using client's timezoneOffset
-      const offsetMinutes = b.timezoneOffset !== undefined ? b.timezoneOffset : 0;
-      const clientNowObj = new Date(now - (offsetMinutes * 60 * 1000));
-      const currentHHMM = String(clientNowObj.getUTCHours()).padStart(2, '0') + ":" + String(clientNowObj.getUTCMinutes()).padStart(2, '0');
-
-      // Check if today is a scheduled day
-      let isScheduledDay = false;
-      const scheduleType = b.scheduleType || 'interval';
-
-      if (scheduleType === 'weekly') {
-        const currentDayOfWeek = clientNowObj.getUTCDay(); // 0 = Sunday, 1 = Monday, etc.
-        const daysOfWeek = b.daysOfWeek || [];
-        isScheduledDay = daysOfWeek.includes(currentDayOfWeek);
-      } else {
-        // Interval scheduling: check if calendar day difference modulo intervalDays is 0
-        const dStart = Math.floor((b.startDate - (offsetMinutes * 60 * 1000)) / (24 * 60 * 60 * 1000));
-        const dNow = Math.floor((now - (offsetMinutes * 60 * 1000)) / (24 * 60 * 60 * 1000));
-        const diffDays = dNow - dStart;
-        const intervalDays = b.intervalDays || 1;
-        isScheduledDay = diffDays >= 0 && (diffDays % intervalDays === 0);
-      }
-
-      if (!isScheduledDay) continue;
-
-      // Check slot times (timeOfDay / timeOfDay2)
-      const timeOfDay = b.timeOfDay || "08:30";
-      const timeOfDay2 = b.timeOfDay2 || "15:30";
-      const frequency = b.frequency || 1;
-
-      let shouldSend = false;
-
-      if (!b.lastSentAt) {
-        // First send ever: check if we are past the timeOfDay
-        if (currentHHMM >= timeOfDay) {
-          shouldSend = true;
-        }
-      } else {
-        const clientLastSentObj = new Date(b.lastSentAt - (offsetMinutes * 60 * 1000));
-        const sentToday = clientLastSentObj.getUTCDate() === clientNowObj.getUTCDate() &&
-                          clientLastSentObj.getUTCMonth() === clientNowObj.getUTCMonth() &&
-                          clientLastSentObj.getUTCFullYear() === clientNowObj.getUTCFullYear();
-
-        if (!sentToday) {
-          // Hasn't been sent today, check if current time is >= timeOfDay
-          if (currentHHMM >= timeOfDay) {
-            shouldSend = true;
-          }
-        } else if (frequency === 2) {
-          // Sent today already, check if we need to send the second slot today
-          const lastSentHours = clientLastSentObj.getUTCHours();
-          const lastSentMinutes = clientLastSentObj.getUTCMinutes();
-          const slot2H = parseFloat(timeOfDay2.split(':')[0]);
-          const slot2M = parseFloat(timeOfDay2.split(':')[1]);
-          
-          const sentBeforeSlot2 = lastSentHours < slot2H || (lastSentHours === slot2H && lastSentMinutes < slot2M);
-          if (sentBeforeSlot2 && currentHHMM >= timeOfDay2) {
-            shouldSend = true;
-          }
-        }
-      }
-
-      if (shouldSend) {
-        console.log(`[BROADCAST POLLER] Exécution de la diffusion ${b._id} pour le bot ${b.automationId}...`);
-        
-        let responseType = b.isGroupStatus ? 'group_status' : (b.buttonType || 'text');
-        let buttons = [];
-        if (!b.isGroupStatus) {
-          if (b.buttonType === 'link' && b.buttonText && b.buttonValue) {
-            buttons = [b.buttonText, b.buttonValue];
-          } else if (b.buttonType === 'call' && b.buttonText && b.buttonValue) {
-            buttons = [b.buttonText, b.buttonValue];
-          }
-        }
-
-        // Resolve destination JIDs (groups vs prospects vs clients)
-        let recipientJids = [];
-        const audience = b.audience || 'groups';
-
-        if (audience === 'groups') {
-          recipientJids = b.groupJids || [];
-        } else {
-          try {
-            const prospects = await client.query(api.automations.getProspectsForAutomation, { 
-              automationId: b.automationId, 
-              token: process.env.MASTER_TOKEN 
-            });
-            if (audience === 'prospects') {
-              recipientJids = prospects.filter(p => !p.hasPurchased).map(p => p.clientNumber);
-            } else if (audience === 'clients') {
-              recipientJids = prospects.filter(p => p.hasPurchased).map(p => p.clientNumber);
-            }
-          } catch (e) {
-            console.error(`[BROADCAST POLLER] Erreur récupération prospects pour ${b.automationId}:`, e.message);
-          }
-        }
-
-        let successfullyQueued = false;
-        let groupIndex = 0;
-        for (const targetJid of recipientJids) {
-          try {
-            // Stagger delay per group: 5 minutes if it is a group status, 2 minutes otherwise to prevent WhatsApp spam bans
-            let delayMs = 0;
-            if (targetJid.endsWith('@g.us')) {
-              const staggerTime = b.isGroupStatus ? 5 * 60 * 1000 : 2 * 60 * 1000;
-              delayMs = groupIndex * staggerTime;
-              groupIndex++;
-              console.log(`[BROADCAST POLLER] Envoi différé de ${delayMs / 1000}s pour le groupe ${targetJid} (Status: ${b.isGroupStatus || false})`);
-            }
-
-            whatsappManager.queuePostPurchaseMessage(
-              b.automationId,
-              targetJid,
-              b.messageText,
-              responseType,
-              buttons,
-              b.imageUrl,
-              delayMs
-            );
-            successfullyQueued = true;
-          } catch (err) {
-            console.error(`[BROADCAST POLLER] Erreur file d'attente pour le destinataire ${targetJid}:`, err.message);
-          }
-        }
-
-        // Even if audience is empty, we must mark it as sent for this slot to avoid looping every 60s
-        if (successfullyQueued || recipientJids.length === 0) {
-          await client.mutation(api.broadcasts.markSent, {
-            id: b._id,
-            token: process.env.MASTER_TOKEN
-          });
-        }
-      }
-    }
-  } catch (error) {
-    console.error('[BROADCAST POLLER] Erreur poller diffusions:', error.message);
-  }
-}, 60000);
 
 
 // Clean up processes on server shutdown
