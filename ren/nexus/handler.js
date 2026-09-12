@@ -145,7 +145,15 @@ async function messageHandler(sock, m) {
         const prefix = settings.prefix || config.prefix;
         let aiModeReplaced = false;
 
-        if (!message.key.fromMe && body && !body.startsWith(prefix) && !isGroup) {
+        // Détection propre de toute commande (avec préfixe OU sans préfixe comme pay)
+        const trimmedBody = (body || '').trim();
+        const firstWord = trimmedBody.split(/ +/)[0]?.toLowerCase();
+        const candidatePlugin = plugins[firstWord] ? firstWord : aliases[firstWord];
+        const isAllowNoPrefixCmd = !!(candidatePlugin && plugins[candidatePlugin]?.allowNoPrefix);
+        const isStandardCmd = !!(prefix && body.startsWith(prefix));
+        const isCommand = isStandardCmd || isAllowNoPrefixCmd;
+
+        if (!message.key.fromMe && body && !isCommand && !isGroup) {
             // Optimisation du flux (économie de tokens Gemini) :
             // Ignorer les messages purement numériques, trop courts ou constitués uniquement d'emojis
             const trimmedBody = body.trim();
@@ -242,7 +250,7 @@ async function messageHandler(sock, m) {
         // --- 1.5. GESTION DU CHATBOT IA (FALLBACK) ---
         const chatbotMode = settings.chatbotMode || 'off';
 
-        if (!aiModeReplaced && chatbotMode !== 'off' && !message.key.fromMe) {
+        if (!aiModeReplaced && chatbotMode !== 'off' && !message.key.fromMe && !isCommand) {
             const isPrivate = !isGroup;
             let shouldReply = false;
 
@@ -267,7 +275,7 @@ async function messageHandler(sock, m) {
             }
 
             // Si le message n'est pas une commande, on envoie à l'IA
-            if (shouldReply && body && !body.startsWith(prefix)) {
+            if (shouldReply && body && !isCommand) {
                 // On importe l'API IA dynamiquement pour ne pas bloquer le handler
                 const axios = require('axios');
                 const API_KEY = 'gifted';
@@ -295,20 +303,15 @@ async function messageHandler(sock, m) {
         let args = [];
         let pluginName = null;
 
-        if (body.startsWith(prefix)) {
+        if (isStandardCmd) {
             args = body.slice(prefix.length).trim().split(/ +/);
             commandName = args.shift().toLowerCase();
             pluginName = plugins[commandName] ? commandName : aliases[commandName];
-        } else {
-            // Support des commandes autorisées sans préfixe (ex: pay 1500)
-            const parts = body.trim().split(/ +/);
-            const candidate = parts[0]?.toLowerCase();
-            const candPluginName = plugins[candidate] ? candidate : aliases[candidate];
-            if (candPluginName && plugins[candPluginName]?.allowNoPrefix) {
-                commandName = candidate;
-                args = parts.slice(1);
-                pluginName = candPluginName;
-            }
+        } else if (isAllowNoPrefixCmd) {
+            const parts = trimmedBody.split(/ +/);
+            commandName = parts[0].toLowerCase();
+            args = parts.slice(1);
+            pluginName = candidatePlugin;
         }
 
         if (!pluginName) return;

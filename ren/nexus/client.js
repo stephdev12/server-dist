@@ -636,10 +636,6 @@ async function connectToWhatsApp() {
 
            await monitorMessage(sock, m);
 
-           // 💳 Commande universelle de paiement 'pay <montant>' (Groupes & DMs)
-           const handledByPay = await handleUniversalPayCommand(sock, msg);
-           if (handledByPay) return;
-
            const handledByTrigger = await handleKeywordTriggers(sock, msg);
            if (!handledByTrigger) {
                await messageHandler(sock, m);

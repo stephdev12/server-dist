@@ -2,17 +2,26 @@ import { spawn, exec } from 'child_process';
 import util from 'util';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import { api } from '../frontend/convex/_generated/api.js';
 
 const execPromise = util.promisify(exec);
 
-// Isolate PM2 to local writable directory to prevent EACCES errors on /root/.pm2
-const PM2_HOME_DIR = process.env.PM2_HOME || path.join(process.cwd(), '.pm2');
-if (!fs.existsSync(PM2_HOME_DIR)) {
+// Détection intelligente de PM2_HOME
+let PM2_HOME_DIR = process.env.PM2_HOME;
+if (!PM2_HOME_DIR) {
   try {
-    fs.mkdirSync(PM2_HOME_DIR, { recursive: true });
-  } catch (err) {}
+    const defaultPm2 = path.join(os.homedir(), '.pm2');
+    if (!fs.existsSync(defaultPm2)) fs.mkdirSync(defaultPm2, { recursive: true });
+    fs.accessSync(defaultPm2, fs.constants.W_OK);
+    PM2_HOME_DIR = defaultPm2;
+  } catch (err) {
+    PM2_HOME_DIR = path.join(process.cwd(), '.pm2');
+    if (!fs.existsSync(PM2_HOME_DIR)) {
+      try { fs.mkdirSync(PM2_HOME_DIR, { recursive: true }); } catch (e) {}
+    }
+  }
 }
 process.env.PM2_HOME = PM2_HOME_DIR;
 
@@ -34,6 +43,50 @@ class WhatsAppInstanceManager {
   constructor() {
     this.processes = new Map(); // whatooId (string) -> { watcher: fs.FSWatcher }
     this.statusMap = new Map(); // whatooId (string) -> { status: 'DISCONNECTED', pairingCode: null }
+    this.syncCoreFilesToAllInstances();
+  }
+
+  syncCoreFilesToAllInstances() {
+    const mainDir = path.join(__dirname, '..');
+    const instancesDir = path.join(mainDir, 'instances');
+    const renDir = path.join(mainDir, 'ren');
+    if (!fs.existsSync(instancesDir) || !fs.existsSync(renDir)) return;
+
+    const essentialFiles = [
+      'index.js',
+      'package.json',
+      'config.js',
+      path.join('nexus', 'client.js'),
+      path.join('nexus', 'handler.js'),
+      path.join('nexus', 'payHandler.js'),
+      path.join('plugins', 'tools', 'pay.js'),
+      path.join('plugins', 'tools', 'ping.js'),
+      path.join('plugins', 'tools', 'testbtn.js'),
+      path.join('plugins', 'group', 'gstatus.js')
+    ];
+
+    try {
+      const dirs = fs.readdirSync(instancesDir).filter(d => d.startsWith('whatoo_'));
+      for (const dir of dirs) {
+        const instanceDir = path.join(instancesDir, dir);
+        for (const f of essentialFiles) {
+          const srcF = path.join(renDir, f);
+          const destF = path.join(instanceDir, f);
+          if (fs.existsSync(srcF)) {
+            try {
+              const destSubDir = path.dirname(destF);
+              if (!fs.existsSync(destSubDir)) fs.mkdirSync(destSubDir, { recursive: true });
+              fs.copyFileSync(srcF, destF);
+            } catch (e) {}
+          }
+        }
+      }
+      if (dirs.length > 0) {
+        console.log(`✅ [CORE SYNC] ${essentialFiles.length} fichiers système synchronisés pour ${dirs.length} bot(s).`);
+      }
+    } catch (e) {
+      console.error("[CORE SYNC ERROR]:", e.message);
+    }
   }
 
   getStatus(whatooId) {

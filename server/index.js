@@ -15,10 +15,20 @@ import crypto from 'crypto';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Ensure local PM2 directory to prevent permission errors on /root/.pm2
-const PM2_HOME_DIR = process.env.PM2_HOME || path.join(process.cwd(), '.pm2');
-if (!fs.existsSync(PM2_HOME_DIR)) {
-  try { fs.mkdirSync(PM2_HOME_DIR, { recursive: true }); } catch (e) {}
+// Détection intelligente de PM2_HOME
+let PM2_HOME_DIR = process.env.PM2_HOME;
+if (!PM2_HOME_DIR) {
+  try {
+    const defaultPm2 = path.join(os.homedir(), '.pm2');
+    if (!fs.existsSync(defaultPm2)) fs.mkdirSync(defaultPm2, { recursive: true });
+    fs.accessSync(defaultPm2, fs.constants.W_OK);
+    PM2_HOME_DIR = defaultPm2;
+  } catch (err) {
+    PM2_HOME_DIR = path.join(process.cwd(), '.pm2');
+    if (!fs.existsSync(PM2_HOME_DIR)) {
+      try { fs.mkdirSync(PM2_HOME_DIR, { recursive: true }); } catch (e) {}
+    }
+  }
 }
 process.env.PM2_HOME = PM2_HOME_DIR;
 
