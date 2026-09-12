@@ -678,8 +678,16 @@ module.exports = {
       console.log(`Clonage du bot REN master vers ${instanceDir}...`);
       this.copyFolderRecursive(renDir, instanceDir);
 
-      // Garantir impérativement la présence des fichiers clés (index.js, package.json, config.js, nexus/client.js, nexus/payHandler.js)
-      const essentialFiles = ['index.js', 'package.json', 'config.js', path.join('nexus', 'client.js'), path.join('nexus', 'payHandler.js')];
+      // Garantir impérativement la présence des fichiers clés (index.js, package.json, config.js, nexus/client.js, nexus/handler.js, plugins/tools/pay.js)
+      const essentialFiles = [
+        'index.js', 
+        'package.json', 
+        'config.js', 
+        path.join('nexus', 'client.js'), 
+        path.join('nexus', 'handler.js'),
+        path.join('plugins', 'tools', 'pay.js'),
+        path.join('plugins', 'tools', 'ping.js')
+      ];
       for (const f of essentialFiles) {
         const srcF = path.join(renDir, f);
         const destF = path.join(instanceDir, f);

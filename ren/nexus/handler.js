@@ -291,13 +291,30 @@ async function messageHandler(sock, m) {
         }
 
         // --- 2. GESTION DES COMMANDES CLASSIQUES ---
-        if (!body.startsWith(prefix)) return;
-if (body === ".ping") console.log(JSON.stringify(message.key, null, 2));
+        let commandName = '';
+        let args = [];
+        let pluginName = null;
 
-        const args = body.slice(prefix.length).trim().split(/ +/);
-        const commandName = args.shift().toLowerCase();
-        const pluginName = plugins[commandName] ? commandName : aliases[commandName];
-        
+        if (body.startsWith(prefix)) {
+            args = body.slice(prefix.length).trim().split(/ +/);
+            commandName = args.shift().toLowerCase();
+            pluginName = plugins[commandName] ? commandName : aliases[commandName];
+        } else {
+            // Support des commandes autorisées sans préfixe (ex: pay 1500)
+            const parts = body.trim().split(/ +/);
+            const candidate = parts[0]?.toLowerCase();
+            const candPluginName = plugins[candidate] ? candidate : aliases[candidate];
+            if (candPluginName && plugins[candPluginName]?.allowNoPrefix) {
+                commandName = candidate;
+                args = parts.slice(1);
+                pluginName = candPluginName;
+            }
+        }
+
+        if (!pluginName) return;
+
+        if (body === ".ping") console.log(JSON.stringify(message.key, null, 2));
+
         if (pluginName) {
             const plugin = plugins[pluginName];
             const senderNum = normalizeJid(sender);
@@ -305,8 +322,8 @@ if (body === ".ping") console.log(JSON.stringify(message.key, null, 2));
             const isUserSudo = isSudo(sender);
 
             // --- GESTION DU MODE PUBLIC/PRIVÉ ---
-            // Si mode privé : Owner OU Sudo autorisé
-            if (settings.mode === 'private' && !isOwner && !isUserSudo) {
+            // Si mode privé : Owner OU Sudo autorisé, sauf si plugin explicitement public
+            if (settings.mode === 'private' && !isOwner && !isUserSudo && !plugin.isPublic) {
                 return; // Ignorer silencieusement
             }
 
