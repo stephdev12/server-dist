@@ -19,6 +19,7 @@ import type * as followups from "../followups.js";
 import type * as forms from "../forms.js";
 import type * as group_settings from "../group_settings.js";
 import type * as http from "../http.js";
+import type * as notifications from "../notifications.js";
 import type * as payments from "../payments.js";
 import type * as responses from "../responses.js";
 import type * as servers from "../servers.js";
@@ -44,6 +45,7 @@ declare const fullApi: ApiFromModules<{
   forms: typeof forms;
   group_settings: typeof group_settings;
   http: typeof http;
+  notifications: typeof notifications;
   payments: typeof payments;
   responses: typeof responses;
   servers: typeof servers;
