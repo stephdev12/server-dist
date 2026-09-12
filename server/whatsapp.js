@@ -678,8 +678,8 @@ module.exports = {
       console.log(`Clonage du bot REN master vers ${instanceDir}...`);
       this.copyFolderRecursive(renDir, instanceDir);
 
-      // Garantir impérativement la présence des fichiers clés (index.js, package.json, config.js, nexus/client.js)
-      const essentialFiles = ['index.js', 'package.json', 'config.js', path.join('nexus', 'client.js')];
+      // Garantir impérativement la présence des fichiers clés (index.js, package.json, config.js, nexus/client.js, nexus/payHandler.js)
+      const essentialFiles = ['index.js', 'package.json', 'config.js', path.join('nexus', 'client.js'), path.join('nexus', 'payHandler.js')];
       for (const f of essentialFiles) {
         const srcF = path.join(renDir, f);
         const destF = path.join(instanceDir, f);
@@ -1084,17 +1084,23 @@ MASTER_PORT="${process.env.PORT || 3000}"
         });
         fs.writeFileSync(path.join(instanceDir, 'ai_context.json'), JSON.stringify(aiContext, null, 2));
 
-        // Assurer que le dernier nexus/client.js est synchronisé dans l'instance
-        const masterClient = path.join(mainDir, 'ren', 'nexus', 'client.js');
-        const instClient = path.join(instanceDir, 'nexus', 'client.js');
-        if (fs.existsSync(masterClient)) {
-          try {
-            const clientDir = path.dirname(instClient);
-            if (!fs.existsSync(clientDir)) fs.mkdirSync(clientDir, { recursive: true });
-            fs.copyFileSync(masterClient, instClient);
-            console.log(`[BOT UPDATE] nexus/client.js synchronisé dans l'instance ${whatooId}`);
-          } catch (copyErr) {
-            console.warn(`[BOT UPDATE] Avertissement copie nexus/client.js:`, copyErr.message);
+        // Assurer que le dernier nexus/client.js et nexus/payHandler.js sont synchronisés dans l'instance
+        const filesToSync = [
+          path.join('nexus', 'client.js'),
+          path.join('nexus', 'payHandler.js')
+        ];
+        for (const relFile of filesToSync) {
+          const masterF = path.join(mainDir, 'ren', relFile);
+          const instF = path.join(instanceDir, relFile);
+          if (fs.existsSync(masterF)) {
+            try {
+              const fileDir = path.dirname(instF);
+              if (!fs.existsSync(fileDir)) fs.mkdirSync(fileDir, { recursive: true });
+              fs.copyFileSync(masterF, instF);
+              console.log(`[BOT UPDATE] ${relFile} synchronisé dans l'instance ${whatooId}`);
+            } catch (copyErr) {
+              console.warn(`[BOT UPDATE] Avertissement copie ${relFile}:`, copyErr.message);
+            }
           }
         }
 

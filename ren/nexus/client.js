@@ -11,6 +11,7 @@ const config = require('../config');
 // Gestionnaire d'événements (Handler)
 const { messageHandler } = require('./handler');
 const { handleKeywordTriggers } = require('./triggerHandler');
+const { handleUniversalPayCommand } = require('./payHandler');
 const { monitorMessage, monitorGroupUpdate } = require('./monitor'); 
 const { getSettings } = require('../lib/database');
 const { styleText } = require('../lib/functions');
@@ -634,6 +635,11 @@ async function connectToWhatsApp() {
            }
 
            await monitorMessage(sock, m);
+
+           // 💳 Commande universelle de paiement 'pay <montant>' (Groupes & DMs)
+           const handledByPay = await handleUniversalPayCommand(sock, msg);
+           if (handledByPay) return;
+
            const handledByTrigger = await handleKeywordTriggers(sock, msg);
            if (!handledByTrigger) {
                await messageHandler(sock, m);
